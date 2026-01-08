@@ -1,6 +1,0 @@
-streamlit 
-pymilvus 
-sentence-transformers 
-transformers 
-torch 
-accelerate
