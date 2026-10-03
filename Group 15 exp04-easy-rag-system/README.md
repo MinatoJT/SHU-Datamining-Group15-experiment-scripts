@@ -1,186 +1,92 @@
-Group 14 - Easy Medical RAG System (FAISS)
+# Group 15 · 轻量医疗文档 RAG 实验
 
-本项目实现了一个轻量级医疗文档 RAG（Retrieval-Augmented Generation）问答系统。离线阶段对医疗文档进行解析、清洗与分块，使用嵌入模型生成向量并建立本地 FAISS 向量索引；在线阶段对用户问题进行向量检索（Top-K），将检索到的证据片段与问题一起输入大语言模型生成答案。系统提供 Streamlit Web 界面用于交互展示与调试，并提供端到端评测脚本输出 qa_e2e_results.jsonl 便于分析。
+文档编号：DM15-SUM-004；修订：0.1；状态：待维护者评审；源码观察基线：`a65747b9ce505fe4e64d847b4d47e68fd686a3ca`。
 
-注意：本仓库使用 FAISS 作为本地向量检索后端，不依赖 Milvus / Docker。
+使用本地文档、SentenceTransformer、FAISS 和 Qwen 构建 Streamlit 问答演示，并提供检索与端到端评价脚本。源码观察基线为 `a65747b9ce505fe4e64d847b4d47e68fd686a3ca`；本说明经静态核对，未重新运行。
 
-⸻
+> 活动检索后端为 FAISS `IndexFlatL2`。`milvus_utils.py`、配置名称和页面仍保留 Milvus Lite 字样；这些字样不代表当前活动后端。医疗回答只用于课程实验，不能用于诊疗。
 
-运行环境要求
-	•	Python 3.10+（推荐 3.10/3.11）
-	•	Windows / macOS / Linux 均可（本项目在 Windows PowerShell 环境下开发）
-	•	可选：GPU（无 GPU 也可运行，但生成模型会慢）
+## 1. 文件与流程
 
-⸻
+| 文件 | 用途 |
+| --- | --- |
+| `preprocess.py` | 当前目录 `data/` 内 `.html` 正文提取、字符分块，写入 `data/processed_data.json` |
+| `preprocess_benchmark_json.py` | 外部语料 JSON 分块；需先改脚本末尾 Windows `IN_JSON` 路径 |
+| `config.py` | UI 的数据/模型/生成设置；含旧 Milvus 参数 |
+| `models.py`、`milvus_utils.py`、`rag_core.py` | 模型加载、FAISS 索引与检索、答案生成 |
+| `app.py` | Streamlit 页面与启动建库 |
+| `eval_questions.py` | 检索评价，默认输出 `Evaluation/run_results.jsonl` |
+| `eval_qa_e2e.py` | 检索+生成+答案相似度，默认输出 `Evaluation/qa_e2e_results_Max_all.jsonl` |
+| `score_qa_results.py` | 从结果文件计算 EM、词级 F1，装有 rouge-score 时计算 ROUGE-L |
+| `results_to_pic.py` | 读取 Max_all JSONL 绘制分布，输出 `Evaluation/qa_e2e_score_hist.png` |
 
-项目结构（示例）
+## 2. 安装准备
 
-仓库根目录下建议保持如下结构（你也可以根据实际文件名调整）：
+先进入本实验目录。建议从 Python 3.10/3.11 的独立环境开始；仓库未锁定可复现版本组合，跨平台和 GPU 可用性需自行验证。
 
-Group 14/
-app.py
-config.py
-models.py
-data_utils.py
-rag_core.py
-preprocess.py
-（可选）eval_questions.py / eval_qa_e2e.py
-data/
-processed_data.json
-Evaluation/
-qa_e2e_results.jsonl
+Windows PowerShell：
 
-⸻
-
-安装与运行步骤（Windows PowerShell）
-
-1）进入项目根目录（示例路径按你电脑实际情况修改）
-cd E:\datamining\exp04-easy-rag-system
-
-2）创建并激活虚拟环境
+```powershell
+cd "Group 15 exp04-easy-rag-system"
 python -m venv .venv
-..venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install faiss-cpu numpy beautifulsoup4 lxml matplotlib
+# 可选评分依赖
+python -m pip install rouge-score
+```
 
-3）升级 pip
-python -m pip install –upgrade pip
+macOS/Linux 的环境激活命令为 `source .venv/bin/activate`，其余安装命令相同。若脚本激活受系统策略阻止，使用虚拟环境中的 Python 可执行文件运行命令；不要为了复现而全局降低安全策略。
 
-4）安装依赖（优先使用 requirements.txt）
-pip install -r “Group 14/requirements.txt”
+现有 `requirements.txt` 包含 streamlit、pymilvus、sentence-transformers、transformers、torch、accelerate，但缺少活动后端 `faiss-cpu` 和预处理/绘图直接依赖。以上为文档补充安装项，未改依赖文件；成功运行后应记录实际版本。
 
-如果仓库里没有 requirements.txt，至少安装这些核心依赖
-pip install streamlit sentence-transformers transformers torch faiss-cpu numpy matplotlib
+`app.py` 会直接设置 `HF_ENDPOINT=https://hf-mirror.com` 与 `HF_HOME=./hf_cache`；评测脚本使用 setdefault。启动前检查所用镜像和模型来源，首次运行需要可访问的模型或完整本地缓存，不应假设外部变量能覆盖 UI 中的赋值。
 
-提示：如果你想安装 GPU 版 PyTorch，请到 PyTorch 官网按对应 CUDA 版本安装。
+## 3. 数据准备与启动
 
-⸻
+运行前先使用隔离工作副本保存历史结果。仓库没有完整提供 `data/processed_data.json` 或外部题集。对新增实验不要盲用已提交的索引和 pickle：仅使用可信文件，并核对数据及模型一致性。
 
-可选：HuggingFace 下载加速（镜像与缓存）
+HTML 路线：将有权使用的 `.html` 文件放到本目录 `data/`，执行：
 
-如果你需要使用 hf-mirror（或其他镜像）并将模型缓存到本地，可以在 PowerShell 设置环境变量：
+```sh
+python preprocess.py
+python -m streamlit run app.py
+```
 
-$env:HF_ENDPOINT=“https://hf-mirror.com”
-$env:HF_HOME=”./hf_cache”
+检查预处理日志和 JSON：应有非空记录，正文块在 `abstract`，默认字符块大小 512、重叠 50。0 chunks 不能视为成功建库。JSON 语料路线需先在工作副本中配置 `preprocess_benchmark_json.py` 的 `IN_JSON`，再执行该脚本。
 
-也可以直接使用项目 app.py 中设置的 os.environ（两者二选一即可）。
+不要使用 `python app.py` 启动页面。页面会加载模型、数据和索引，查询时展示证据与生成答案。当前 `data_utils.py` 无法读到数据时会跳过建库；如果历史索引已恢复文档映射，页面仍可能提供查询。因此页面可用不代表新数据已被索引，必须检查日志和证据来源。
 
-⸻
+## 4. 索引和配置
 
-数据预处理（生成 processed_data.json）
+UI 默认嵌入模型 `all-MiniLM-L6-v2`（384 维）、生成模型 `Qwen/Qwen2.5-0.5B`、Top-K=3、最多索引前 2000 条记录、最多生成 512 tokens。
 
-1）准备原始数据
-将原始医疗文档（例如 HTML 文件）放入：
-Group 14\data\
+`MILVUS_LITE_DATA_PATH=./milvus_lite_data.db` 经代码替换后得到 `.faiss` 和 `.meta.pkl` 两文件。旧 `.db` 不是活动 FAISS 文件。`INDEX_TYPE`、`INDEX_PARAMS`、`SEARCH_PARAMS` 等旧 Milvus 配置不改变实际 `IndexFlatL2` 检索。
 
-2）运行预处理脚本
-python “Group 14/preprocess.py”
+建库跳过逻辑主要比较数量，没有检查语料内容或模型版本。改变数据、嵌入模型或索引上限后，先在隔离工作副本将旧 `.faiss/.meta.pkl` 成对移到备份位置，重新启动并核对日志；不要覆盖唯一历史证据。不要加载不明来源的 pickle 文件。
 
-成功后会生成：
-Group 14\data\processed_data.json
+## 5. 评价流程
 
-如果输出显示 0 chunks，说明预处理没有提取到正文文本或数据格式不匹配，需要检查输入文件路径、HTML 解析规则或字段抽取逻辑。
+两个评价脚本的 `QUESTIONS_JSON` 均硬编码为开发者 Windows 路径，没有 CLI 参数。先在工作副本中设置有效题集路径，核对 FAISS、元数据、模型、Top-K 与数据版本。检索评价的 gold ID 要与代码生成的整数位置 ID 对齐，不能直接混用原始文档 ID。
 
-⸻
+```sh
+python eval_questions.py
+python eval_qa_e2e.py
+# 先将 RESULT_JSONL 指向本次端到端输出，再运行
+python score_qa_results.py
+# 先核对 JSONL_PATH 和 OUT_PATH，避免覆盖历史图
+python results_to_pic.py
+```
 
-启动 Web 问答系统（Streamlit）
+`eval_questions.py` 是检索评价，不生成答案。`eval_qa_e2e.py` 当前限制前 100 道问题，使用独立常量而非自动读取 UI 配置，生成上限 256 tokens；它追加写入并跳过已存在的 question。每次换参数应改用新的结果文件，避免混合历史结果。
 
-在仓库根目录运行：
-streamlit run “Group 14/app.py”
+端到端输出包含 `question/reference_answer/generated_answer/similarity_cosine/retrieved_doc_ids/retrieved_preview`。余弦相似度衡量答案嵌入相近程度，不代表事实或医学正确率。评分默认读 `qa_e2e_results.jsonl`，而端到端默认写 `qa_e2e_results_Max_all.jsonl`，运行前必须对齐。分布图限制横轴 0–1，可能不显示负余弦分数；完整分析应检查原始 JSONL。
 
-浏览器会自动打开（默认地址通常是 http://localhost:8501 ）。在页面输入问题并点击按钮，即可看到：
-	•	Top-K 检索到的证据片段（可折叠展示）
-	•	基于证据生成的答案
+## 6. 证据与限制
 
-注意：不要用 python app.py 直接运行，否则会出现 missing ScriptRunContext 等提示；必须用 streamlit run 启动。
+已提交 JSONL、索引、数据库和图片都是历史产物，不表示本次环境已复现。完整工程说明见 [验证计划](../docs/VERIFICATION.md)、[配置基线](../docs/CONFIGURATION.md) 和 [问题追踪](../docs/TRACEABILITY.md)。
 
-⸻
+## 使用范围
 
-关键参数说明（config.py）
-
-常用调参项在 Group 14\config.py 中：
-	•	MAX_ARTICLES_TO_INDEX：最大索引文本块数量（控制建库规模，用于做 1000 vs 2000 对比实验）
-	•	TOP_K：检索返回证据数量
-	•	EMBEDDING_MODEL_NAME：嵌入模型（默认 all-MiniLM-L6-v2，对应 384 维）
-	•	GENERATION_MODEL_NAME：生成模型（默认 Qwen/Qwen2.5-0.5B）
-	•	MAX_NEW_TOKENS_GEN、TEMPERATURE、TOP_P、REPETITION_PENALTY：生成控制参数
-
-建议做对比实验时将 TEMPERATURE 设置为 0（或很小），减少随机性导致的评测波动。
-
-⸻
-
-端到端评测（可选）
-
-如果仓库中包含评测脚本（例如 eval_questions.py 或 eval_qa_e2e.py），可运行批量评测并生成结果文件。
-
-运行示例：
-python “Group 14/eval_questions.py”
-
-输出通常会保存到：
-Group 14\Evaluation\qa_e2e_results.jsonl
-
-结果文件中每条记录一般包含：
-question、reference_answer、generated_answer、similarity_cosine、retrieved_doc_ids 等字段，可用于统计与可视化。
-
-⸻
-
-绘制评分分布图（可选）
-
-确保你已经生成了 Group 14\Evaluation\qa_e2e_results.jsonl，然后运行下面的脚本生成直方图（会保存为 qa_e2e_score_hist.png）。如果你不想新建文件，可以把这段脚本临时保存为 plot_hist.py 再运行 python plot_hist.py：
-
-import json
-import numpy as np
-import matplotlib.pyplot as plt
-
-jsonl_path = r”./Group 14/Evaluation/qa_e2e_results.jsonl”
-out_path   = r”./qa_e2e_score_hist.png”
-
-scores = []
-with open(jsonl_path, “r”, encoding=“utf-8”) as f:
-for line in f:
-obj = json.loads(line)
-v = obj.get(“similarity_cosine”, None)
-if v is not None:
-scores.append(float(v))
-
-scores = np.array(scores, dtype=float)
-
-plt.figure(figsize=(10, 7))
-bins = np.linspace(0, 1, 31)
-plt.hist(scores, bins=bins)
-
-for t, c in [(0.5, “orange”), (0.7, “black”), (0.85, “red”)]:
-plt.axvline(t, linewidth=3, color=c)
-plt.text(t, plt.ylim()[1] * 0.95, f”{t}”, rotation=90, va=“top”, ha=“right”, color=c)
-
-plt.title(“Distribution of similarity_cosine (QA E2E)”)
-plt.xlabel(“similarity_cosine”)
-plt.ylabel(“count”)
-plt.xlim(0, 1)
-plt.tight_layout()
-plt.savefig(out_path, dpi=200)
-print(“Saved:”, out_path)
-
-⸻
-
-常见问题
-
-1）Streamlit 报 missing ScriptRunContext
-原因通常是使用 python app.py 直接运行。请改用：
-streamlit run “Group 14/app.py”
-
-2）HuggingFace 429 Too Many Requests
-表示镜像/网络对你的 IP 限流。解决办法：
-	•	换网络（例如手机热点）
-	•	使用自己的 HuggingFace 账号 Token（HF_TOKEN）
-	•	等一段时间再试或确保模型缓存已下载完成
-
-3）Git push 报 Recv failure: Connection was reset
-这是网络连接问题（常见于校园网/公司网限制 GitHub）。建议：
-	•	换网络（手机热点）
-	•	检查并清理 git 代理配置（git config –global –get https.proxy）
-	•	必要时使用 GitHub Desktop 或 VPN
-
-⸻
-
-License
-
-本项目仅用于课程/实验与学习用途。
+本项目仅用于课程/实验与学习用途。本次文档整理不新增许可证；数据与模型需分别遵守来源许可。
